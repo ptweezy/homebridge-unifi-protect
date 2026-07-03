@@ -12,6 +12,8 @@ This patch:
 
 It is generated against `hap-nodejs` tag **`v2.1.7`**. The changes are structurally identical across recent releases; apply it against the tag your Homebridge bundles (Homebridge 2.x → `@homebridge/hap-nodejs` 2.x, Homebridge 1.x → `hap-nodejs` 0.14.x).
 
+The patch also adds `src/lib/camera/HevcTlv.spec.ts`, a self-contained Jest test that verifies the multi-codec TLV serialization (H.264-only, H.264+H.265, and byte-identical back-compat). After applying the patch you can run it with `npx jest src/lib/camera/HevcTlv.spec.ts`. The existing camera specs (`RTPStreamManagement.spec.ts`, `RecordingManagement.spec.ts`) continue to pass unchanged, which confirms the H.264-only output is byte-for-byte identical to before.
+
 See **[docs/HomeKit-HEVC.md](../docs/HomeKit-HEVC.md)** for the full rationale, installation instructions, the provisional H.265 profile/level caveat, and verification steps.
 
 > [!NOTE]

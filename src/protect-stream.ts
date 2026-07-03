@@ -456,10 +456,24 @@ export class ProtectStreamingDelegate implements HomebridgeStreamingDelegate {
     // accordingly.
     const isHighLatency = request.audio.packet_time >= 60;
 
-    // HomeKit tells us which video codec it negotiated for this session (VideoInfo.codec). When it selects HEVC - which only capable clients on iOS 27 / tvOS 27+ do,
-    // and only when we've advertised it for this natively-H.265 camera - we deliver the native H.265 stream by copying it, since we have no HEVC encoder to transcode to.
-    // We compare against the HEVC codec type resolved from the running HAP; on older HAP releases hevcCodecType is null and this is always false.
-    const isHevcPassthrough = (this.hevcCodecType !== null) && ((request.video.codec as number) === this.hevcCodecType) && (this.protectCamera.ufp.videoCodec === "h265");
+    // HomeKit tells us which video codec it negotiated for this session (VideoInfo.codec). It selects HEVC only if we advertised it (a natively-H.265 camera on a
+    // HEVC-capable HAP) and only capable clients (iOS 27 / tvOS 27+) do so. We compare against the HEVC codec type resolved from the running HAP; on older HAP releases
+    // hevcCodecType is null and this is always false.
+    const isHevcRequested = (this.hevcCodecType !== null) && ((request.video.codec as number) === this.hevcCodecType);
+
+    // We advertise our supported codecs once, at startup, and HomeKit caches them - but a camera can change its codec at runtime (e.g. an H.265 to H.264 switch in the
+    // Protect settings, which fires a videoCodec update but can't retroactively change what we've already advertised to HomeKit). If HomeKit negotiated HEVC and the camera
+    // is no longer encoding in H.265, we cannot honor it: HEVC is delivered by copying the native stream and we have no HEVC encoder to fall back on. Rather than hand
+    // HomeKit an undecodable H.264 stream inside an HEVC session, we fail fast so it can retry (restarting HBUP re-advertises the camera's current codec).
+    if(isHevcRequested && (this.protectCamera.ufp.videoCodec !== "h265")) {
+
+      const errorMessage = "Unable to start video stream: HomeKit negotiated HEVC, but the camera is no longer encoding in H.265.";
+
+      this.log.error(errorMessage);
+      callback(new Error(this.protectCamera.accessoryName + ": " + errorMessage));
+
+      return;
+    }
 
     // We transcode based in the following circumstances:
     //
@@ -470,10 +484,10 @@ export class ProtectStreamingDelegate implements HomebridgeStreamingDelegate {
     //      producing).
     //   4. The codec in use on the Protect camera isn't H.264.
     //
-    // The one exception is an HEVC passthrough session: when HomeKit has negotiated HEVC against a natively-H.265 camera, we always copy the stream, since transcoding
-    // would require an HEVC encoder we don't have. This bypasses the transcoding preferences above (cropping is already excluded, since we don't advertise HEVC when it's
-    // enabled).
-    const isTranscoding = !isHevcPassthrough && (this.protectCamera.hints.transcode || this.protectCamera.hints.crop ||
+    // The one exception is an HEVC passthrough session: when HomeKit has negotiated HEVC (guaranteed to be a natively-H.265 camera by the guard above), we always copy the
+    // stream, since transcoding would require an HEVC encoder we don't have. This bypasses the transcoding preferences above (cropping is already excluded, since we don't
+    // advertise HEVC when it's enabled).
+    const isTranscoding = !isHevcRequested && (this.protectCamera.hints.transcode || this.protectCamera.hints.crop ||
       (isHighLatency && this.protectCamera.hints.transcodeHighLatency) || (this.protectCamera.ufp.videoCodec !== "h264"));
 
     // Set the initial bitrate we should use for this request based on what HomeKit is requesting.

@@ -32,7 +32,7 @@ Most modern UniFi Protect cameras (G4, G5, G6 families) encode in H.265 by defau
 | **HEVC live streaming (passthrough)** | ✅ Implemented | A native H.265 camera stream is copied directly to iOS 27 / tvOS 27 clients — no transcoding. |
 | **4K live streaming** | ✅ Already supported | HBUP already advertises resolutions up to 3840×2160. iOS 27 clients can now request them; the copy path serves the native 4K stream. No change was needed here. |
 | **H.264 fallback** | ✅ Guaranteed | H.264 is always advertised first. Pre‑iOS‑27 clients (and any client that declines HEVC) transparently continue to use H.264 exactly as before. |
-| **HEVC HomeKit Secure Video *recording*** | ⏳ Follow-up | The HAP patch advertises the recording capability, but true HEVC *recording passthrough* additionally requires a copy path in [`homebridge-plugin-utils`](https://github.com/hjdhjd/homebridge-plugin-utils) — its recording pipeline currently always re-encodes to H.264. See [HomeKit Secure Video recording](#homekit-secure-video-recording). HKSV continues to record normally (H.264) in the meantime. |
+| **HEVC HomeKit Secure Video *recording*** | ⏳ Follow-up | The HAP patch *adds the API* to advertise HEVC recording, but the plugin does not use it yet — true recording *passthrough* additionally requires a copy path in [`homebridge-plugin-utils`](https://github.com/hjdhjd/homebridge-plugin-utils), whose recording pipeline currently always re-encodes to H.264. See [HomeKit Secure Video recording](#homekit-secure-video-recording). HKSV continues to record normally (H.264) in the meantime. |
 
 - - -
 

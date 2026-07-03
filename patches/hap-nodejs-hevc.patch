@@ -1,3 +1,96 @@
+diff --git a/src/lib/camera/HevcTlv.spec.ts b/src/lib/camera/HevcTlv.spec.ts
+new file mode 100644
+index 0000000..6f51a40
+--- /dev/null
++++ b/src/lib/camera/HevcTlv.spec.ts
+@@ -0,0 +1,87 @@
++import { RecordingManagement } from "./RecordingManagement";
++import { RTPStreamManagement, VideoCodecType } from "./RTPStreamManagement";
++
++// A minimal TLV8 walker for verification. Our codec-configuration entries are each well under 255 bytes (a handful of
++// resolutions), so no type-fragment reassembly is required for these tests.
++function walk(buf: Buffer): { type: number, value: Buffer }[] {
++  const out: { type: number, value: Buffer }[] = [];
++  let i = 0;
++  while (i < buf.length) {
++    const type = buf[i];
++    const len = buf[i + 1];
++    out.push({ type, value: buf.subarray(i + 2, i + 2 + len) });
++    i += 2 + len;
++  }
++  return out;
++}
++
++// Extract the CODEC_TYPE (sub-TLV type 0x01) from a Video Codec Configuration buffer.
++function codecTypeOf(configValue: Buffer): number {
++  const codecTlv = walk(configValue).find(t => t.type === 0x01); // VideoCodecConfigurationTypes.CODEC_TYPE
++  return codecTlv!.value[0];
++}
++
++// The private serializers are reached at runtime via casts (they take a plain options object and are pure w.r.t. `this`).
++const streamSerialize = (RTPStreamManagement as unknown as
++  { _supportedVideoStreamConfiguration(o: unknown): string })._supportedVideoStreamConfiguration;
++const recordSerialize = (RecordingManagement.prototype as unknown as
++  { _supportedVideoRecordingConfiguration(o: unknown): string })._supportedVideoRecordingConfiguration;
++
++const RESOLUTIONS = [[1920, 1080, 30], [1280, 720, 15]];
++
++describe("HEVC TLV serialization", () => {
++
++  it("streaming: advertises H.264 only when no h265 parameters are supplied", () => {
++    const b64 = streamSerialize({ codec: { profiles: [1], levels: [0, 1, 2] }, resolutions: RESOLUTIONS });
++    const configs = walk(Buffer.from(b64, "base64")).filter(t => t.type === 0x01); // VIDEO_CODEC_CONFIGURATION
++
++    expect(configs).toHaveLength(1);
++    expect(codecTypeOf(configs[0].value)).toBe(VideoCodecType.H264);
++  });
++
++  it("streaming: advertises H.264 followed by H.265 when h265 parameters are supplied", () => {
++    const b64 = streamSerialize({
++      codec: { profiles: [1], levels: [0, 1, 2] },
++      h265: { profiles: [0], levels: [0, 1, 2, 3] },
++      resolutions: RESOLUTIONS,
++    });
++    const configs = walk(Buffer.from(b64, "base64")).filter(t => t.type === 0x01);
++
++    expect(configs).toHaveLength(2);
++    expect(configs.map(c => codecTypeOf(c.value))).toEqual([0x00, 0x01]); // H264 first, then H265
++  });
++
++  it("streaming: the H.264 configuration is byte-identical whether or not H.265 is also advertised", () => {
++    const opts = { codec: { profiles: [1], levels: [0, 1, 2] }, resolutions: RESOLUTIONS };
++    const h264Only = walk(Buffer.from(streamSerialize(opts), "base64")).filter(t => t.type === 0x01)[0];
++    const withHevc = walk(Buffer.from(streamSerialize({ ...opts, h265: { profiles: [0], levels: [0] } }), "base64"))
++      .filter(t => t.type === 0x01)[0];
++
++    expect(withHevc.value.equals(h264Only.value)).toBe(true);
++  });
++
++  it("recording: a single VideoRecordingOptions advertises exactly one (H.264) configuration", () => {
++    const b64 = recordSerialize.call(null, { type: 0, parameters: { profiles: [1], levels: [0, 1, 2] }, resolutions: RESOLUTIONS });
++    const configs = walk(Buffer.from(b64, "base64")).filter(t => t.type === 0x01);
++
++    expect(configs).toHaveLength(1);
++    expect(codecTypeOf(configs[0].value)).toBe(VideoCodecType.H264);
++  });
++
++  it("recording: an array advertises one Video Codec Configuration per codec, in order", () => {
++    const b64 = recordSerialize.call(null, [
++      { type: 0, parameters: { profiles: [1], levels: [0, 1, 2] }, resolutions: RESOLUTIONS },
++      { type: 1, parameters: { profiles: [0], levels: [0, 1, 2, 3] }, resolutions: [[3840, 2160, 30]] },
++    ]);
++    const configs = walk(Buffer.from(b64, "base64")).filter(t => t.type === 0x01);
++
++    expect(configs).toHaveLength(2);
++    expect(configs.map(c => codecTypeOf(c.value))).toEqual([0x00, 0x01]);
++  });
++
++  it("recording: a single-element array is byte-identical to passing that object directly (back-compat)", () => {
++    const one = { type: 0, parameters: { profiles: [1], levels: [0, 1, 2] }, resolutions: RESOLUTIONS };
++
++    expect(recordSerialize.call(null, [one])).toEqual(recordSerialize.call(null, one));
++  });
++});
 diff --git a/src/lib/camera/RTPStreamManagement.ts b/src/lib/camera/RTPStreamManagement.ts
 index 88822ce..a3ee998 100644
 --- a/src/lib/camera/RTPStreamManagement.ts
