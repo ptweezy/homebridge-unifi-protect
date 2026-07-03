@@ -27,6 +27,7 @@ export interface ProtectHints {
   enabled: boolean;
   hardwareDecoding: boolean;
   hardwareTranscoding: boolean;
+  hevcStreaming: boolean;
   highResSnapshots: boolean;
   hksvRecordingIndicator: boolean;
   ledStatus: boolean;

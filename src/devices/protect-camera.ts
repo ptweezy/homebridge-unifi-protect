@@ -79,6 +79,7 @@ export class ProtectCamera extends ProtectDevice {
     this.hints.crop = this.hasFeature("Video.Crop");
     this.hints.hardwareDecoding = true;
     this.hints.hardwareTranscoding = this.hasFeature("Video.Transcode.Hardware");
+    this.hints.hevcStreaming = this.hasFeature("Video.Stream.HEVC");
     this.hints.highResSnapshots = this.hasFeature("Video.HighResSnapshots");
     this.hints.hksvRecordingIndicator = this.hasFeature("Video.HKSV.StatusLedIndicator");
     this.hints.ledStatus = this.ufp.featureFlags.hasLedStatus && this.hasFeature("Device.StatusLed");

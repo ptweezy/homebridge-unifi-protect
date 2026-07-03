@@ -74,6 +74,7 @@ I hope to continue to work on this one to get AEC working for two-way audio. [Yo
   * [Audio Options](https://github.com/hjdhjd/homebridge-unifi-protect/blob/main/docs/AudioOptions.md): options to further tailor how audio is handled from Protect, such as background noise reduction.
   * [Doorbells](https://github.com/hjdhjd/homebridge-unifi-protect/blob/main/docs/Doorbell.md): how UniFi Protect doorbell support works in this plugin, and how to use all the available features including doorbell messages.
   * [HomeKit Secure Video](https://github.com/hjdhjd/homebridge-unifi-protect/blob/main/docs/HomeKitSecureVideo.md): how HomeKit Secure Video support works in this plugin with UniFi Protect.
+  * [HEVC & 4K Streaming](https://github.com/hjdhjd/homebridge-unifi-protect/blob/main/docs/HomeKit-HEVC.md): native H.265 (HEVC) and 4K streaming to iOS 27 / tvOS 27 clients, without transcoding.
   * [Liveview Scenes](https://github.com/hjdhjd/homebridge-unifi-protect/blob/main/docs/Liveviews.md): use the UniFi Protect liveviews feature (available in the UniFi Protect controller webUI) to create motion-detection scenes.
   * [MQTT](https://github.com/hjdhjd/homebridge-unifi-protect/blob/main/docs/MQTT.md): how to configure MQTT support.
   * [Plugin Configuration Reference](https://github.com/hjdhjd/homebridge-unifi-protect/blob/main/docs/ConfigurationReference.md): complete list of configuration options available in this plugin.

@@ -1,0 +1,354 @@
+diff --git a/src/lib/camera/RTPStreamManagement.ts b/src/lib/camera/RTPStreamManagement.ts
+index 88822ce..a3ee998 100644
+--- a/src/lib/camera/RTPStreamManagement.ts
++++ b/src/lib/camera/RTPStreamManagement.ts
+@@ -59,8 +59,12 @@ const enum VideoAttributesTypes {
+  */
+ export const enum VideoCodecType {
+   H264 = 0x00,
+-  // while the namespace is already reserved for H265 it isn't currently supported.
+-  // H265 = 0x01,
++  /**
++   * H.265 / HEVC. HomeKit clients running iOS 27 / tvOS 27 (and later) negotiate this codec for both live
++   * streaming and HomeKit Secure Video recording. Older clients simply ignore the H.265 codec configuration
++   * and continue to select {@link VideoCodecType.H264}.
++   */
++  H265 = 0x01,
+ }
+ 
+ /**
+@@ -81,6 +85,36 @@ export const enum H264Level {
+   LEVEL4_0 = 0x02,
+ }
+ 
++/**
++ * H.265 / HEVC profiles.
++ *
++ * The `Video Codec Parameters` TLV reuses the {@link VideoCodecParametersTypes.PROFILE_ID} field for H.265. The
++ * enumeration values below follow Apple's `HomeKit Secure Video Open Source Compatibility Guide` (tvOS 27 / iOS 27
++ * developer preview). Should Apple finalize different identifiers, only these values need to be adjusted.
++ *
++ * @group Camera
++ */
++export const enum H265Profile {
++  MAIN = 0x00,
++  MAIN_10 = 0x01,
++}
++
++/**
++ * H.265 / HEVC levels.
++ *
++ * The `Video Codec Parameters` TLV reuses the {@link VideoCodecParametersTypes.LEVEL} field for H.265. HEVC levels
++ * are advertised up to 5.1 to accommodate 4K (2160p) streams. As with {@link H265Profile}, these values mirror the
++ * tvOS 27 / iOS 27 developer preview guide and are the single place to adjust should Apple finalize different ones.
++ *
++ * @group Camera
++ */
++export const enum H265Level {
++  LEVEL3_1 = 0x00,
++  LEVEL4_0 = 0x01,
++  LEVEL5_0 = 0x02,
++  LEVEL5_1 = 0x03,
++}
++
+ /**
+  * @group Camera
+  */
+@@ -301,6 +335,12 @@ function isLegacySRTPOptions(options: any): options is CameraStreamingOptionsLeg
+  */
+ export type VideoStreamingOptions = {
+   codec: H264CodecParameters,
++  /**
++   * When supplied, an additional H.265 / HEVC video codec configuration is advertised to HomeKit alongside the
++   * mandatory H.264 configuration. HomeKit clients that support HEVC (iOS 27 / tvOS 27 and later) may then select
++   * it, allowing an accessory to deliver a native HEVC stream without transcoding. Older clients ignore it.
++   */
++  h265?: H265CodecParameters,
+   resolutions: Resolution[],
+   cvoId?: number,
+ }
+@@ -313,6 +353,14 @@ export interface H264CodecParameters {
+   profiles: H264Profile[],
+ }
+ 
++/**
++ * @group Camera
++ */
++export interface H265CodecParameters {
++  levels: H265Level[],
++  profiles: H265Profile[],
++}
++
+ /**
+  * @group Camera
+  */
+@@ -508,8 +556,8 @@ export type AudioInfo = {
+  */
+ export type VideoInfo = {  // minimum keyframe interval is about 5 seconds
+   codec: VideoCodecType;
+-  profile: H264Profile,
+-  level: H264Level,
++  profile: H264Profile | H265Profile,
++  level: H264Level | H265Level,
+   packetizationMode: VideoCodecPacketizationMode,
+   cvoId?: number, // Coordination of Video Orientation, only supplied if enabled AND supported; ranges from 1 to 14
+ 
+@@ -1346,48 +1394,65 @@ export class RTPStreamManagement {
+       throw new Error("Video resolutions cannot be undefined");
+     }
+ 
+-    let codecParameters = tlv.encode(
+-      VideoCodecParametersTypes.PROFILE_ID, videoOptions.codec.profiles,
+-      VideoCodecParametersTypes.LEVEL, videoOptions.codec.levels,
+-      VideoCodecParametersTypes.PACKETIZATION_MODE, VideoCodecPacketizationMode.NON_INTERLEAVED,
+-    );
++    // The supported resolutions (image attributes) are identical across codecs, so we encode them once and reuse them
++    // for every advertised codec configuration.
++    const attributes = videoOptions.resolutions.map(resolution => {
++      if (resolution.length !== 3) {
++        throw new Error("Unexpected video resolution");
++      }
+ 
+-    if (videoOptions.cvoId != null) {
+-      codecParameters = Buffer.concat([
+-        codecParameters,
+-        tlv.encode(
+-          VideoCodecParametersTypes.CVO_ENABLED, VideoCodecCVO.SUPPORTED,
+-          VideoCodecParametersTypes.CVO_ID, videoOptions.cvoId,
+-        ),
+-      ]);
+-    }
++      const width = Buffer.alloc(2);
++      const height = Buffer.alloc(2);
++      const frameRate = Buffer.alloc(1);
+ 
+-    const videoStreamConfiguration = tlv.encode(
+-      VideoCodecConfigurationTypes.CODEC_TYPE, VideoCodecType.H264,
+-      VideoCodecConfigurationTypes.CODEC_PARAMETERS, codecParameters,
+-      VideoCodecConfigurationTypes.ATTRIBUTES, videoOptions.resolutions.map(resolution => {
+-        if (resolution.length !== 3) {
+-          throw new Error("Unexpected video resolution");
+-        }
++      width.writeUInt16LE(resolution[0], 0);
++      height.writeUInt16LE(resolution[1], 0);
++      frameRate.writeUInt8(resolution[2], 0);
++
++      return tlv.encode(
++        VideoAttributesTypes.IMAGE_WIDTH, width,
++        VideoAttributesTypes.IMAGE_HEIGHT, height,
++        VideoAttributesTypes.FRAME_RATE, frameRate,
++      );
++    });
+ 
+-        const width = Buffer.alloc(2);
+-        const height = Buffer.alloc(2);
+-        const frameRate = Buffer.alloc(1);
++    // Build a single `Video Codec Configuration` TLV for a given codec type, profiles and levels.
++    const buildCodecConfiguration = (type: VideoCodecType, profiles: number[], levels: number[]): Buffer => {
++      let codecParameters = tlv.encode(
++        VideoCodecParametersTypes.PROFILE_ID, profiles,
++        VideoCodecParametersTypes.LEVEL, levels,
++        VideoCodecParametersTypes.PACKETIZATION_MODE, VideoCodecPacketizationMode.NON_INTERLEAVED,
++      );
+ 
+-        width.writeUInt16LE(resolution[0], 0);
+-        height.writeUInt16LE(resolution[1], 0);
+-        frameRate.writeUInt8(resolution[2], 0);
++      if (videoOptions.cvoId != null) {
++        codecParameters = Buffer.concat([
++          codecParameters,
++          tlv.encode(
++            VideoCodecParametersTypes.CVO_ENABLED, VideoCodecCVO.SUPPORTED,
++            VideoCodecParametersTypes.CVO_ID, videoOptions.cvoId,
++          ),
++        ]);
++      }
+ 
+-        return tlv.encode(
+-          VideoAttributesTypes.IMAGE_WIDTH, width,
+-          VideoAttributesTypes.IMAGE_HEIGHT, height,
+-          VideoAttributesTypes.FRAME_RATE, frameRate,
+-        );
+-      }),
+-    );
++      return tlv.encode(
++        VideoCodecConfigurationTypes.CODEC_TYPE, type,
++        VideoCodecConfigurationTypes.CODEC_PARAMETERS, codecParameters,
++        VideoCodecConfigurationTypes.ATTRIBUTES, attributes,
++      );
++    };
++
++    // The mandatory H.264 configuration is always advertised. When HEVC parameters are supplied, an additional H.265
++    // configuration is appended so that capable HomeKit clients (iOS 27 / tvOS 27+) can negotiate it.
++    const videoStreamConfigurations: Buffer[] = [
++      buildCodecConfiguration(VideoCodecType.H264, videoOptions.codec.profiles, videoOptions.codec.levels),
++    ];
++
++    if (videoOptions.h265) {
++      videoStreamConfigurations.push(buildCodecConfiguration(VideoCodecType.H265, videoOptions.h265.profiles, videoOptions.h265.levels));
++    }
+ 
+     return tlv.encode(
+-      SupportedVideoStreamConfigurationTypes.VIDEO_CODEC_CONFIGURATION, videoStreamConfiguration,
++      SupportedVideoStreamConfigurationTypes.VIDEO_CODEC_CONFIGURATION, videoStreamConfigurations,
+     ).toString("base64");
+   }
+ 
+diff --git a/src/lib/camera/RecordingManagement.ts b/src/lib/camera/RecordingManagement.ts
+index 10c6604..244098e 100644
+--- a/src/lib/camera/RecordingManagement.ts
++++ b/src/lib/camera/RecordingManagement.ts
+@@ -24,7 +24,7 @@ import { HAPStatus } from "../HAPServer";
+ import { Service } from "../Service";
+ import { HapStatusError } from "../util/hapStatusError";
+ import * as tlv from "../util/tlv";
+-import { H264CodecParameters, H264Level, H264Profile, Resolution } from "./RTPStreamManagement";
++import { H264CodecParameters, H264Level, H264Profile, H265CodecParameters, H265Level, H265Profile, Resolution } from "./RTPStreamManagement";
+ 
+ const debug = createDebug("HAP-NodeJS:Camera:RecordingManagement");
+ const hksvDebug = createDebug("HAP-NodeJS:HKSV");
+@@ -65,7 +65,12 @@ export interface CameraRecordingOptions {
+    */
+   mediaContainerConfiguration: MediaContainerConfiguration | MediaContainerConfiguration[];
+ 
+-  video: VideoRecordingOptions,
++  /**
++   * The supported video codec configuration(s). A single {@link VideoRecordingOptions} advertises one codec (H.264,
++   * as required by all HomeKit clients). Supplying an array additionally advertises further codecs — e.g. an H.265 /
++   * HEVC configuration for iOS 27 / tvOS 27 clients — each as its own `Video Codec Configuration` TLV.
++   */
++  video: VideoRecordingOptions | VideoRecordingOptions[],
+   audio: AudioRecordingOptions,
+ }
+ 
+@@ -117,7 +122,7 @@ export interface MediaContainerConfiguration {
+  */
+ export interface VideoRecordingOptions {
+   type: VideoCodecType;
+-  parameters: H264CodecParameters;
++  parameters: H264CodecParameters | H265CodecParameters;
+   /**
+    * Required resolutions to be supported are:
+    * * 1920x1080
+@@ -178,11 +183,12 @@ export interface CameraRecordingConfiguration {
+   mediaContainerConfiguration: MediaContainerConfiguration;
+ 
+   /**
+-   * The selected video codec configuration.
++   * The selected video codec configuration. The `type` reflects the codec HomeKit chose from the advertised
++   * {@link CameraRecordingOptions.video} configurations ({@link VideoCodecType.H264} or {@link VideoCodecType.H265}).
+    */
+   videoCodec: {
+-    type: VideoCodecType.H264;
+-    parameters: SelectedH264CodecParameters,
++    type: VideoCodecType;
++    parameters: SelectedH264CodecParameters | SelectedH265CodecParameters,
+     resolution: Resolution,
+   },
+ 
+@@ -208,6 +214,19 @@ export interface SelectedH264CodecParameters {
+   iFrameInterval: number,
+ }
+ 
++/**
++ * @group Camera
++ */
++export interface SelectedH265CodecParameters {
++  profile: H265Profile,
++  level: H265Level,
++  bitRate: number,
++  /**
++   * The selected i-frame interval in milliseconds.
++   */
++  iFrameInterval: number,
++}
++
+ 
+ const enum VideoCodecConfigurationTypes {
+   CODEC_TYPE = 0x01,
+@@ -735,45 +754,53 @@ export class RecordingManagement {
+     ).toString("base64");
+   }
+ 
+-  private _supportedVideoRecordingConfiguration(videoOptions: VideoRecordingOptions): string {
+-    if (!videoOptions.parameters) {
+-      throw new Error("Video parameters cannot be undefined");
+-    }
+-    if (!videoOptions.resolutions) {
+-      throw new Error("Video resolutions cannot be undefined");
++  private _supportedVideoRecordingConfiguration(videoOptions: VideoRecordingOptions | VideoRecordingOptions[]): string {
++    const videoConfigurations = Array.isArray(videoOptions) ? videoOptions : [videoOptions];
++
++    if (videoConfigurations.length === 0) {
++      throw new Error("CameraRecordingOptions.video: At least one video codec configuration must be specified!");
+     }
+ 
+-    const codecParameters = tlv.encode(
+-      VideoCodecParametersTypes.PROFILE_ID, videoOptions.parameters.profiles,
+-      VideoCodecParametersTypes.LEVEL, videoOptions.parameters.levels,
+-    );
+-
+-    const videoStreamConfiguration = tlv.encode(
+-      VideoCodecConfigurationTypes.CODEC_TYPE, videoOptions.type,
+-      VideoCodecConfigurationTypes.CODEC_PARAMETERS, codecParameters,
+-      VideoCodecConfigurationTypes.ATTRIBUTES, videoOptions.resolutions.map(resolution => {
+-        if (resolution.length !== 3) {
+-          throw new Error("Unexpected video resolution");
+-        }
++    const videoStreamConfigurations: Buffer[] = videoConfigurations.map(videoOption => {
++      if (!videoOption.parameters) {
++        throw new Error("Video parameters cannot be undefined");
++      }
++      if (!videoOption.resolutions) {
++        throw new Error("Video resolutions cannot be undefined");
++      }
+ 
+-        const width = Buffer.alloc(2);
+-        const height = Buffer.alloc(2);
+-        const frameRate = Buffer.alloc(1);
++      const codecParameters = tlv.encode(
++        VideoCodecParametersTypes.PROFILE_ID, videoOption.parameters.profiles,
++        VideoCodecParametersTypes.LEVEL, videoOption.parameters.levels,
++      );
+ 
+-        width.writeUInt16LE(resolution[0], 0);
+-        height.writeUInt16LE(resolution[1], 0);
+-        frameRate.writeUInt8(resolution[2], 0);
++      return tlv.encode(
++        VideoCodecConfigurationTypes.CODEC_TYPE, videoOption.type,
++        VideoCodecConfigurationTypes.CODEC_PARAMETERS, codecParameters,
++        VideoCodecConfigurationTypes.ATTRIBUTES, videoOption.resolutions.map(resolution => {
++          if (resolution.length !== 3) {
++            throw new Error("Unexpected video resolution");
++          }
+ 
+-        return tlv.encode(
+-          VideoAttributesTypes.IMAGE_WIDTH, width,
+-          VideoAttributesTypes.IMAGE_HEIGHT, height,
+-          VideoAttributesTypes.FRAME_RATE, frameRate,
+-        );
+-      }),
+-    );
++          const width = Buffer.alloc(2);
++          const height = Buffer.alloc(2);
++          const frameRate = Buffer.alloc(1);
++
++          width.writeUInt16LE(resolution[0], 0);
++          height.writeUInt16LE(resolution[1], 0);
++          frameRate.writeUInt8(resolution[2], 0);
++
++          return tlv.encode(
++            VideoAttributesTypes.IMAGE_WIDTH, width,
++            VideoAttributesTypes.IMAGE_HEIGHT, height,
++            VideoAttributesTypes.FRAME_RATE, frameRate,
++          );
++        }),
++      );
++    });
+ 
+     return tlv.encode(
+-      SupportedVideoRecordingConfigurationTypes.VIDEO_CODEC_CONFIGURATION, videoStreamConfiguration,
++      SupportedVideoRecordingConfigurationTypes.VIDEO_CODEC_CONFIGURATION, videoStreamConfigurations,
+     ).toString("base64");
+   }
+ 

@@ -5,7 +5,7 @@
  * This module is heavily inspired by the homebridge and homebridge-camera-ffmpeg source code. Thank you for your contributions to the HomeKit world.
  */
 import type { API, CameraController, CameraControllerOptions, HAP, PrepareStreamCallback, PrepareStreamRequest, PrepareStreamResponse, SRTPCryptoSuites, Service,
-  SnapshotRequest, SnapshotRequestCallback, StartStreamRequest, StreamRequestCallback, StreamingRequest } from "homebridge";
+  SnapshotRequest, SnapshotRequestCallback, StartStreamRequest, StreamRequestCallback, StreamingRequest, VideoStreamingOptions } from "homebridge";
 import { Agent, type ErrorEvent, WebSocket } from "undici";
 import { AudioRecordingCodecType, AudioRecordingSamplerate, AudioStreamingCodecType, AudioStreamingSamplerate, H264Level, H264Profile, MediaContainerType,
   StreamRequestTypes } from "homebridge";
@@ -19,6 +19,14 @@ import { ProtectRecordingDelegate } from "./protect-record.js";
 import { ProtectReservedNames } from "./protect-types.js";
 import { ProtectSnapshot } from "./protect-snapshot.js";
 import { once } from "node:events";
+
+// HomeKit H.265 / HEVC codec parameter identifiers. These mirror HAP-NodeJS' H265Profile and H265Level enums exactly
+// (see docs/HomeKit-HEVC.md) and are declared here as plain numeric values so the plugin continues to build against
+// homebridge releases whose bundled HAP-NodeJS predates HEVC support - we never import the HEVC enums directly. They
+// are only ever advertised to HomeKit when the running HAP exposes the HEVC codec type (VideoCodecType.H265). The Main
+// profile at levels through 5.1 spans the full range of Protect's H.265 streams, including 4K (2160p).
+const HOMEKIT_HEVC_PROFILES = [0];          // [ H265Profile.MAIN ]
+const HOMEKIT_HEVC_LEVELS = [ 0, 1, 2, 3 ]; // [ H265Level.LEVEL3_1, H265Level.LEVEL4_0, H265Level.LEVEL5_0, H265Level.LEVEL5_1 ]
 
 interface OngoingSessionEntry {
 
@@ -61,6 +69,7 @@ export class ProtectStreamingDelegate implements HomebridgeStreamingDelegate {
   public controller: CameraController;
   public readonly ffmpegOptions: FfmpegOptions;
   private readonly hap: HAP;
+  private readonly hevcCodecType: Nullable<number>;
   public hksv: Nullable<ProtectRecordingDelegate>;
   public readonly log: HomebridgePluginLogging;
   private readonly nvr: ProtectNvr;
@@ -91,6 +100,13 @@ export class ProtectStreamingDelegate implements HomebridgeStreamingDelegate {
     this.probesizeOverrideCount = 0;
     this.verboseFfmpeg = false;
 
+    // Determine whether we can offer HomeKit a native H.265 / HEVC stream. HomeKit clients negotiate HEVC beginning with
+    // iOS 27 / tvOS 27, but only when the running HAP can represent the codec type. We resolve VideoCodecType.H265 from
+    // the running HAP so the plugin builds and runs unchanged against homebridge releases whose bundled HAP-NodeJS
+    // predates HEVC support - in which case this is null and we transparently fall back to H.264-only behavior. We read
+    // the enum member through an untyped view since it doesn't exist in the type definitions of pre-HEVC HAP releases.
+    this.hevcCodecType = (this.hap as unknown as { VideoCodecType: Record<string, number | undefined> }).VideoCodecType.H265 ?? null;
+
     // Configure our hardware acceleration support.
     this.ffmpegOptions = new FfmpegOptions({
 
@@ -119,6 +135,31 @@ export class ProtectStreamingDelegate implements HomebridgeStreamingDelegate {
 
     // Configure our snapshot handler.
     this.snapshot = new ProtectSnapshot(protectCamera);
+
+    // HomeKit always requires an H.264 codec configuration for streaming. When the camera is encoding in H.265 and the
+    // running HAP understands HEVC, we advertise an additional H.265 configuration so that capable clients (iOS 27 /
+    // tvOS 27+) can select it and receive the camera's native stream without transcoding. We don't offer HEVC when
+    // cropping is enabled, since cropping forces a transcode to H.264 - and we have no HEVC encoder to transcode back to.
+    const videoStreamingOptions: VideoStreamingOptions & { h265?: { levels: number[]; profiles: number[] } } = {
+
+      codec: {
+
+        // Through admittedly anecdotal testing on various G3 and G4 models, UniFi Protect seems to support only the H.264 Main profile, though it does support various
+        // H.264 levels, ranging from Level 3 through Level 5.1 (G4 Pro at maximum resolution). However, HomeKit only supports Level 3.1, 3.2, and 4.0 currently.
+        levels: [ H264Level.LEVEL3_1, H264Level.LEVEL3_2, H264Level.LEVEL4_0 ],
+        profiles: [H264Profile.MAIN]
+      },
+
+      // Retrieve the list of supported resolutions from the camera and apply our best guesses for how to map specific resolutions to the available RTSP streams on a
+      // camera. Unfortunately, this creates challenges in doing on-the-fly RTSP changes in UniFi Protect. Once the list of supported resolutions is set here, there's no
+      // going back unless a user restarts HBUP. Homebridge doesn't have a way to dynamically adjust the list of supported resolutions at this time.
+      resolutions: resolutions
+    };
+
+    if(this.protectCamera.hints.hevcStreaming && (this.hevcCodecType !== null) && (this.protectCamera.ufp.videoCodec === "h265") && !this.protectCamera.hints.crop) {
+
+      videoStreamingOptions.h265 = { levels: HOMEKIT_HEVC_LEVELS, profiles: HOMEKIT_HEVC_PROFILES };
+    }
 
     // Setup for our camera controller.
     const options: CameraControllerOptions = {
@@ -208,22 +249,9 @@ export class ProtectStreamingDelegate implements HomebridgeStreamingDelegate {
 
         supportedCryptoSuites: [this.hap.SRTPCryptoSuites.AES_CM_128_HMAC_SHA1_80],
 
-        video: {
-
-          codec: {
-
-            // Through admittedly anecdotal testing on various G3 and G4 models, UniFi Protect seems to support only the H.264 Main profile, though it does support
-            // various H.264 levels, ranging from Level 3 through Level 5.1 (G4 Pro at maximum resolution). However, HomeKit only supports Level 3.1, 3.2, and 4.0
-            // currently.
-            levels: [ H264Level.LEVEL3_1, H264Level.LEVEL3_2, H264Level.LEVEL4_0 ],
-            profiles: [H264Profile.MAIN]
-          },
-
-          // Retrieve the list of supported resolutions from the camera and apply our best guesses for how to map specific resolutions to the available RTSP streams on a
-          // camera. Unfortunately, this creates challenges in doing on-the-fly RTSP changes in UniFi Protect. Once the list of supported resolutions is set here, there's
-          // no going back unless a user retarts HBUP. Homebridge doesn't have a way to dynamically adjust the list of supported resolutions at this time.
-          resolutions: resolutions
-        }
+        // Our supported video codec configuration(s). Always H.264, plus H.265 / HEVC when this camera and the running
+        // HAP support it (see above).
+        video: videoStreamingOptions
       }
     };
 
@@ -423,6 +451,16 @@ export class ProtectStreamingDelegate implements HomebridgeStreamingDelegate {
       return;
     }
 
+    // How do we determine if we're a high latency connection? We look at the RTP packet time of the audio packet time for a hint. HomeKit uses values of 20, 30, 40,
+    // and 60ms. We make an assumption, validated by lots of real-world testing, that when we see 60ms used by HomeKit, it's a high latency connection and act
+    // accordingly.
+    const isHighLatency = request.audio.packet_time >= 60;
+
+    // HomeKit tells us which video codec it negotiated for this session (VideoInfo.codec). When it selects HEVC - which only capable clients on iOS 27 / tvOS 27+ do,
+    // and only when we've advertised it for this natively-H.265 camera - we deliver the native H.265 stream by copying it, since we have no HEVC encoder to transcode to.
+    // We compare against the HEVC codec type resolved from the running HAP; on older HAP releases hevcCodecType is null and this is always false.
+    const isHevcPassthrough = (this.hevcCodecType !== null) && ((request.video.codec as number) === this.hevcCodecType) && (this.protectCamera.ufp.videoCodec === "h265");
+
     // We transcode based in the following circumstances:
     //
     //   1. The user has explicitly configured transcoding.
@@ -432,12 +470,11 @@ export class ProtectStreamingDelegate implements HomebridgeStreamingDelegate {
     //      producing).
     //   4. The codec in use on the Protect camera isn't H.264.
     //
-    // How do we determine if we're a high latency connection? We look at the RTP packet time of the audio packet time for a hint. HomeKit uses values of 20, 30, 40,
-    // and 60ms. We make an assumption, validated by lots of real-world testing, that when we see 60ms used by HomeKit, it's a high latency connection and act
-    // accordingly.
-    const isHighLatency = request.audio.packet_time >= 60;
-    const isTranscoding = this.protectCamera.hints.transcode || this.protectCamera.hints.crop || (isHighLatency && this.protectCamera.hints.transcodeHighLatency) ||
-      (this.protectCamera.ufp.videoCodec !== "h264");
+    // The one exception is an HEVC passthrough session: when HomeKit has negotiated HEVC against a natively-H.265 camera, we always copy the stream, since transcoding
+    // would require an HEVC encoder we don't have. This bypasses the transcoding preferences above (cropping is already excluded, since we don't advertise HEVC when it's
+    // enabled).
+    const isTranscoding = !isHevcPassthrough && (this.protectCamera.hints.transcode || this.protectCamera.hints.crop ||
+      (isHighLatency && this.protectCamera.hints.transcodeHighLatency) || (this.protectCamera.ufp.videoCodec !== "h264"));
 
     // Set the initial bitrate we should use for this request based on what HomeKit is requesting.
     let targetBitrate = request.video.max_bit_rate;
@@ -678,8 +715,9 @@ export class ProtectStreamingDelegate implements HomebridgeStreamingDelegate {
       // The livestream API needs to be transmuxed before we use it directly.
       if(useTsb) {
 
-        // -bsf:v h264_mp4toannexb    Convert the livestream container format from MP4 to MPEG-TS.
-        ffmpegArgs.push("-bsf:v", "h264_mp4toannexb");
+        // -bsf:v ..._mp4toannexb     Convert the livestream container format from MP4 to MPEG-TS. The bitstream filter is codec-specific: HEVC for H.265 streams (e.g. an
+        //                            HEVC passthrough session to an iOS 27 / tvOS 27 client) and H.264 otherwise.
+        ffmpegArgs.push("-bsf:v", (this.protectCamera.ufp.videoCodec === "h265") ? "hevc_mp4toannexb" : "h264_mp4toannexb");
       }
     }
 
